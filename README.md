@@ -13,20 +13,20 @@ To begin your Airflow journey, follow this beginner-friendly guide to set up Apa
 # Step 2: Clone & Use DAGs from Feature Branch
   Once Airflow is up and running locally:
   📁 Clone your Airflow-learning GitHub repository
-  git clone <your-airflow-learning-repo-url>
-  cd airflow-learning
+      > git clone <your-airflow-learning-repo-url>
+      > cd airflow-learning
   🌿 Switch to the feature branch
-      git checkout feature-airflow-dag
+      > git checkout feature-airflow-dag
       
   📌 Copy your DAGs into the Airflow DAGs folder
-      cp dags/* ~/airflow/dags/
+      > cp dags/* ~/airflow/dags/
 
   🔄 Restart Airflow to load new DAGs:
-      docker-compose down
-      docker-compose up -d
+      > docker-compose down
+      > docker-compose up -d
       
 🧪 Test the DAGs via the Airflow UI:
-      Go to http://localhost:8080 and enable your DAGs.
+      > Go to http://localhost:8080 and enable your DAGs.
 
 # ✅ Step 3: Practice and Iterate
 Now that everything is set:
