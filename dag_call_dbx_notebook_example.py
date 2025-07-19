@@ -1,66 +1,81 @@
-'''Import Modules'''
+# Import required modules
 import os
-from airflow.utils.dates import days_ago
+from datetime import datetime, timedelta
+import pendulum
+
 from airflow import DAG
-from airflow.models import Variable
 from airflow.operators.dummy import DummyOperator
 from airflow.operators.python import PythonOperator
 from airflow.operators.email import EmailOperator
+from airflow.models import Variable
+
 from astro_databricks import DatabricksNotebookOperator, DatabricksWorkflowTaskGroup
-from datetime import datetime, timedelta
-import pendulum
-from airflow_functions import *
 
-'''Default Arguments'''
-dag_id = os.path.basename(__file__).split(".")[0]
-dag_run_id = '{{ dag_run.run_id }}'
+# --------------------------------------------
+# DAG Configuration
+# --------------------------------------------
+
+# Unique name for the DAG
+dag_id = "demo_databricks_dag"
+
+# Databricks connection (configured in Airflow Connections)
 databricks_conn_id = "databricks_default"
+
+# Variables
 env = "dev"
-email_url = Variable.get('email_notification_logicapp')
-default_init_framework = Variable.get('default_init_framework')
-default_init_master = Variable.get('default_init_master')
-cluster_log_destination = Variable.get('cluster_log_destination')
+cluster_log_destination = "dbfs:/cluster-logs/"  # Where cluster logs will be stored
+default_init_framework = "/Workspace/init-scripts/framework-init.sh"
+default_init_master = "/Workspace/init-scripts/master-init.sh"
 
-yesterday_dag_date = datetime.now() - timedelta(days=1)
-dag_start_date = pendulum.datetime(yesterday_dag_date.year, yesterday_dag_date.month, yesterday_dag_date.day)
+# Start date for the DAG (yesterday)
+dag_start_date = pendulum.datetime(
+    datetime.now().year, datetime.now().month, datetime.now().day - 1
+)
 
-pipeline_start_time = '{{ dag_run.start_date.strftime("%Y%m%d_%H%M%S") }}'
-RunId = 'af_' + dag_id + '_run_' + str(pipeline_start_time)
-
-'''Cluster Configurations'''
+# --------------------------------------------
+# Databricks Cluster Configuration
+# --------------------------------------------
 Cluster_id_1 = [
     {
         "job_cluster_key": "Cluster_id_1",
         "new_cluster": {
             "spark_version": "11.3.x-scala2.12",
-            "node_type_id": "Standard_D8s_v3",
-            "spark_env_vars": {"PYSPARK_PYTHON": "/databricks/python3/bin/python3"},
-            "num_workers": "1",
-            "cluster_log_conf": {"dbfs": {"destination": cluster_log_destination}},
+            "node_type_id": "Standard_D8s_v3",  # Azure node type
+            "num_workers": 1,  # Single worker node
+            "spark_env_vars": {
+                "PYSPARK_PYTHON": "/databricks/python3/bin/python3"
+            },
+            "cluster_log_conf": {
+                "dbfs": {
+                    "destination": cluster_log_destination
+                }
+            },
             "init_scripts": [
-                {"workspace": {"destination": f"{default_init_framework}"}},
-                {"workspace": {"destination": f"{default_init_master}"}}
+                {"workspace": {"destination": default_init_framework}},
+                {"workspace": {"destination": default_init_master}},
             ],
         }
     }
 ]
 
-'''DAG Definition'''
+# --------------------------------------------
+# DAG Definition
+# --------------------------------------------
 with DAG(
     dag_id=dag_id,
     start_date=dag_start_date,
-    tags=['Scheduled', '11.3.x-scala2.12', 'DBX'],
-    schedule='15 23 * * 6',
+    schedule='15 23 * * 6',  # Runs every Saturday at 11:15 PM
     max_active_runs=1,
     catchup=False,
+    tags=['Scheduled', 'Databricks'],
     default_args={
-        "owner": "DEMOOWNER",
-        "default_view": "graph",
-        'dag_run_id': dag_run_id,
-    },
+        "owner": "demo_owner"
+    }
 ) as dag:
 
-    # Define task group using Databricks workflow
+    # ----------------------------------------
+    # Databricks Workflow Task Group
+    # ----------------------------------------
     job_Cluster_id_1 = DatabricksWorkflowTaskGroup(
         group_id="Cluster_id_1_grp",
         job_clusters=Cluster_id_1,
@@ -72,57 +87,60 @@ with DAG(
     )
 
     with job_Cluster_id_1:
-        '''Databricks Notebook Task'''
+
+        # ------------------------------------
+        # Databricks Notebook Task
+        # ------------------------------------
         dbx_demo = DatabricksNotebookOperator(
-            job_cluster_key="Cluster_id_1",
             task_id="dbx_call_from_airflow",
-            notebook_path="/projects/demo_project/demo_notebook",
+            job_cluster_key="Cluster_id_1",
+            notebook_path="/projects/demo_project/demo_notebook",  # Databricks notebook path
             notebook_params={
-                'pipeline_id': RunId,
+                'pipeline_id': 'af_demo_run_20250717_091500',  # Example run ID
                 'env': env,
                 'pipeline_name': dag_id,
-                'pipeline_dag_run_id': dag_run_id,
+                'pipeline_dag_run_id': 'manual__2025-07-17T09:15:00',
                 'MetricDesc': 'Demo notebook called from airflow',
                 'lowerBoundary': '100000',
                 'upperBoundary': '200000',
                 'Severity': 'Medium',
-                "trace_partition_timestamp": "{{ ts_nodash }}"
+                'trace_partition_timestamp': '20250717T091500'  # Static timestamp example
             },
             databricks_conn_id=databricks_conn_id,
-            source="WORKSPACE",
-            outlets=[Dataset('demo.demo_dataset')]
+            source="WORKSPACE"
         )
 
-    '''Success Email'''
+    # ----------------------------------------
+    # Success Notification via Email
+    # ----------------------------------------
     email_on_success = EmailOperator(
         task_id='send_success_email',
         to='team@example.com',
-        subject=f"[Airflow] DAG {dag_id} Succeeded",
-        html_content=f"DAG {dag_id} completed successfully at {{ ts }}."
+        subject="Airflow DAG demo_databricks_dag Succeeded",
+        html_content="DAG demo_databricks_dag completed successfully at 2025-07-17 09:15:00."
     )
 
-    '''Failure Email'''
+    # ----------------------------------------
+    # Failure Notification via Email
+    # ----------------------------------------
     email_on_failure = EmailOperator(
         task_id='send_failure_email',
         to='team@example.com',
-        subject=f"[Airflow] DAG {dag_id} Failed",
-        html_content=f"DAG {dag_id} failed at {{ ts }}.",
-        trigger_rule='one_failed'
+        subject="Airflow DAG demo_databricks_dag Failed",
+        html_content="DAG demo_databricks_dag failed at 2025-07-17 09:15:00.",
+        trigger_rule='one_failed'  # Trigger this only if a previous task fails
     )
 
-    '''Exception Handling'''
-    exception_handling = PythonOperator(
-        task_id='exception_handling',
-        trigger_rule='one_failed',
-        python_callable=raise_pagerduty_inc,
-        op_kwargs={"dag_id": dag_id, "Impact": "demo notebook failed"},
-    )
-
-    '''Final Dummy Task'''
+    # ----------------------------------------
+    # Dummy Task for Final Step (Success Path)
+    # ----------------------------------------
     final_status = DummyOperator(
-        task_id='final_status',
+        task_id='final_status'
     )
 
-    '''DAG Dependencies'''
-    dbx_demo >> final_status >> email_on_success
-    dbx_demo >> exception_handling >> email_on_failure
+    # ----------------------------------------
+    # Task Dependencies
+    # ----------------------------------------
+    dbx_demo >> final_status >> email_on_success  # Success flow
+    dbx_demo >> email_on_failure  # Failure flow
+
