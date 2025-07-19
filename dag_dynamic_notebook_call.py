@@ -1,121 +1,175 @@
-'''Import Modules''' 
-from airflow.utils.timezone import datetime
+# --------------------------------------------
+# Import Required Modules
+# --------------------------------------------
+
+# Airflow core components
 from airflow import DAG
-from airflow.decorators import dag, task_group
-from airflow import Dataset
-from airflow.models import Variable  
-from airflow.operators.python_operator import PythonOperator
+from airflow.models import Variable
+
+# Operators
+from airflow.operators.dummy import DummyOperator
+from airflow.operators.python import PythonOperator
+from airflow.operators.email import EmailOperator
+
+# Databricks-specific operators (from Astro Databricks provider)
 from astro_databricks import DatabricksNotebookOperator, DatabricksWorkflowTaskGroup
-from airflow.operators.dummy_operator import DummyOperator
-import os
+
+# Python modules
 from datetime import datetime, timedelta
 import pendulum
-from airflow_functions import *
 
-'''Default Arguments'''
-dag_id = os.path.basename(__file__).split(".")[0]	# Dynamically set DAG ID from filename
-dag_run_id = '{{ dag_run.run_id }}'			# Jinja template to pull DAG run ID from context
-databricks_conn_id = "databricks_uc"
-env = Variable.get("env")
-email_url = Variable.get('email_notification_logicapp')
-default_init_framework = Variable.get('default_init_framework')
-default_init_master = Variable.get('default_init_master')
-cluster_log_destination = Variable.get('cluster_log_destination')
-retry_count_var = int(Variable.get("retry_count"))
-retry_delay_var = int(Variable.get("retry_delay"))
-yesterday_dag_date = datetime.now() - timedelta(days=1)
-dag_start_date = pendulum.datetime(yesterday_dag_date.year, yesterday_dag_date.month, yesterday_dag_date.day)
-uc_policy_id = Variable.get('uc_single_policy_id')
 
-pipeline_start_time = '{{ dag_run.start_date.strftime("%Y%m%d_%H%M%S") }}'
-RunId = 'af_' + dag_id + '_run_' + str(pipeline_start_time)
-pipeline_start_time_invoke_orch_YmdHMS = '{{ dag_run.start_date.strftime("%Y-%m-%d %H:%M:%S") }}'
-pipeline_start_time_invoke_orch_mdYHMS = '{{ dag_run.start_date.strftime("%m/%d/%Y %H:%M:%S") }}'
-pipeline_end_time_invoke_orch_YmdHMS = pl_invoke_orch_current_time_YmdHMS()
-pipeline_end_time_invoke_orch_mdYHMS = pl_invoke_orch_current_time_mdYHMS()
+# --------------------------------------------
+# DAG-Level Constants and Configuration
+# --------------------------------------------
 
-'''Cluster Configuration''' 
+dag_id = "demo_adhoc_databricks_dag"  # Unique DAG ID
+databricks_conn_id = "databricks_uc"  # Databricks connection configured in Airflow UI
+env = "dev"                            # Example environment value
+uc_policy_id = "policy-abc123"        # Example Unity Catalog policy ID
+
+# Retry behavior for the notebook task
+retry_count = 2                       # Number of retry attempts
+retry_delay_minutes = 5              # Delay (in minutes) between retries
+
+# DAG start date set to "yesterday" to avoid scheduling conflicts
+dag_start_date = pendulum.datetime(
+    datetime.now().year,
+    datetime.now().month,
+    datetime.now().day - 1
+)
+
+
+# --------------------------------------------
+# Databricks Cluster Configuration
+# --------------------------------------------
+
+# This defines the compute cluster that Databricks will use to run the notebook.
 Cluster_id_1 = [
     {
-        "job_cluster_key": "Cluster_id_1",
+        "job_cluster_key": "Cluster_id_1",  # Logical cluster name used by notebook task
         "new_cluster": {
-            "spark_version": "14.3.x-scala2.12",
-            "node_type_id": "Standard_D16s_v3",
-            "spark_env_vars": {"PYSPARK_PYTHON": "/databricks/python3/bin/python3"},
-            "num_workers": "10",
-            "cluster_log_conf": {"dbfs": {"destination": "dbfs:/mnt/cluster-logs"}},
-            "custom_tags": {"DBUClusterName": "pass_parameter_toDBX_cluster_1"},
-            "policy_id": f"{uc_policy_id}"      # Enforce UC policy on the cluster
+            "spark_version": "14.3.x-scala2.12",     # Databricks runtime version
+            "node_type_id": "Standard_D16s_v3",       # VM instance type
+            "num_workers": 10,                        # Number of worker nodes
+            "spark_env_vars": {
+                "PYSPARK_PYTHON": "/databricks/python3/bin/python3"  # Use Python 3
+            },
+            "cluster_log_conf": {
+                "dbfs": {
+                    "destination": "dbfs:/mnt/cluster-logs"  # Where logs are stored
+                }
+            },
+            "custom_tags": {
+                "DBUClusterName": "pass_parameter_toDBX_cluster_1"  # Tag for tracking
+            },
+            "policy_id": uc_policy_id  # Enforce Unity Catalog policy
         }
     }
 ]
 
-'''DAG Definition'''
-dag_run_id, RunId, pipeline_start_time, dag_run_conf = get_dag_run_attributes(dag_id)
-pipeline_id = RunId
+
+# --------------------------------------------
+# DAG Definition
+# --------------------------------------------
 
 with DAG(
     dag_id=dag_id,
     start_date=dag_start_date,
-    tags=['Dataset', '14.3.x-scala2.12', 'DBX'],
-    schedule=None,
-    max_active_runs=1,
-    catchup=False,
+    schedule=None,               # No automatic scheduling; triggered manually
+    max_active_runs=1,           # Only one DAG instance allowed at a time
+    catchup=False,               # Skip missed DAG runs
+    tags=['Adhoc', 'Databricks'],  # Tags for UI filtering
     default_args={
-        "owner": "DEMOOWNER",
-        "default_view": "graph",
-        'dag_run_id': dag_run_id,
-    },
-    params={
-        "dbx_notebook_path": '',
-        "dbx_parameters": ''
+        "owner": "DEMOOWNER"
     }
 ) as dag:
 
+    # ----------------------------------------
+    # Define a Databricks Task Group (Cluster Wrapper)
+    # ----------------------------------------
+
     job_Cluster_id_1 = DatabricksWorkflowTaskGroup(
-        group_id="Cluster_id_1_grp",
-        job_clusters=Cluster_id_1,
-        databricks_conn_id=databricks_conn_id,
-        notebook_packages=[{"pypi": {"package": "pandas"}}]
+        group_id="Cluster_id_1_grp",  # Logical name for the group
+        job_clusters=Cluster_id_1,    # Cluster config defined above
+        databricks_conn_id=databricks_conn_id,  # Connection ID for Databricks
+        notebook_packages=[
+            {"pypi": {"package": "pandas"}}  # Example PyPI dependency
+        ]
     )
-    
+
+    # All tasks in this block will use the above cluster
     with job_Cluster_id_1:
+
+        # ------------------------------------
+        # Databricks Notebook Task
+        # ------------------------------------
+
         dbx_adhoc_task = DatabricksNotebookOperator(
-            job_cluster_key="Cluster_id_1",
-            task_id="dbx_adhoc_task",
-            retry_delay=retry_delay_var,
-            retries=retry_count_var,
-            trigger_rule='all_done',
-            notebook_path='/Workspace/projects/adhoc/pass_parameter_to_notebook',
-            notebook_params={
+            task_id="dbx_adhoc_task",  # Unique task ID within the DAG
+            job_cluster_key="Cluster_id_1",  # Use the cluster defined earlier
+            notebook_path="/Workspace/projects/adhoc/pass_parameter_to_notebook",  # Notebook path in DBX workspace
+            notebook_params={  # Parameters to be passed into the notebook
                 "dag_id": dag_id,
-                "dag_run_id": dag_run_id,
-                "dbx_notebook_path": dag_run_conf.get('dbx_notebook_path', ''),
-                "dbx_parameters": dag_run_conf.get('dbx_parameters', ''),
+                "dag_run_id": "manual__2025-07-17T09:15:00",  # Example run ID
+                "dbx_notebook_path": "/Workspace/projects/adhoc/pass_parameter_to_notebook",
+                "dbx_parameters": "--input data.csv",
                 "dag_group_id": "grp_1",
                 "dag_task_id": "adhoc_runner_task",
-                "pipeline_id": RunId,
+                "pipeline_id": "af_demo_adhoc_databricks_dag_run_20250717_091500",
                 "pipeline_name": "Demo_Pipeline"
             },
             databricks_conn_id=databricks_conn_id,
             source="WORKSPACE",
+            retries=retry_count,
+            retry_delay=timedelta(minutes=retry_delay_minutes),
+            trigger_rule='all_done'  # Ensures task completes regardless of prior success/failure
         )
 
+    # ----------------------------------------
+    # Dummy Task to Represent Dataset Output
+    # ----------------------------------------
     outlet_activity = DummyOperator(
-        task_id='outlet_activity',
-        dag=dag,
-        outlets=[Dataset(f'Demo_Dataset')]
+        task_id='outlet_activity'  # Could be used to signal a dataset was updated
     )
 
-    '''Exception Handling'''
+    # ----------------------------------------
+    # Email Notification on Success
+    # ----------------------------------------
+    email_on_success = EmailOperator(
+        task_id='send_success_email',
+        to='team@example.com',
+        subject="Airflow DAG demo_adhoc_databricks_dag Succeeded",
+        html_content="DAG demo_adhoc_databricks_dag completed successfully at 2025-07-17 09:15:00."
+    )
+
+    # ----------------------------------------
+    # Email Notification on Failure
+    # ----------------------------------------
+    email_on_failure = EmailOperator(
+        task_id='send_failure_email',
+        to='team@example.com',
+        subject="Airflow DAG demo_adhoc_databricks_dag Failed",
+        html_content="DAG demo_adhoc_databricks_dag failed at 2025-07-17 09:15:00.",
+        trigger_rule='one_failed'  # Only send this if a task failed
+    )
+
+    # ----------------------------------------
+    # Optional Exception Handling
+    # ----------------------------------------
     exception_handling = PythonOperator(
         task_id='exception_handling',
-        trigger_rule='one_failed',
-        python_callable=raise_pagerduty_inc,
-        op_kwargs={"dag_id": dag_id, "Impact": f"No impact"},
-        dag=dag
+        python_callable=lambda: print("Triggering PagerDuty or Alert Logic here."),  # Replace with real logic
+        trigger_rule='one_failed'  # Runs only if something fails upstream
     )
 
-'''DAG Dependencies''' 
-job_Cluster_id_1 >> outlet_activity
-job_Cluster_id_1 >> exception_handling
+
+    # ----------------------------------------
+    # Set Task Dependencies (Execution Order)
+    # ----------------------------------------
+
+    # Success path: If notebook completes, mark output and send success email
+    job_Cluster_id_1 >> outlet_activity >> email_on_success
+
+    # Failure path: If notebook fails, trigger exception handler and send failure email
+    job_Cluster_id_1 >> exception_handling >> email_on_failure
